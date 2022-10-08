@@ -1,72 +1,58 @@
 #define _USE_MATH_DEFINES
-
 #include <iostream>
-#include <string>
 #include <random>
-#include <time.h>
 #include <cmath>
 #include "mpi.h"
-
-#define GOAL 8.0*M_PI/3.0
-
-using namespace std;
-
-double integrate(int rank, int size, int n) {
-  double x, y, z, r, theta, sum = 0.0;
-  double offset = (2.0/size);
-  double left_x = rank * offset;
-  double right_x = (rank+1) * offset;
-  double volume = M_PI * (right_x - left_x);
-
-  std::random_device rand_dev;
-  std::mt19937 gen(rand_dev());
-  std::uniform_real_distribution<> distr_r(0, 1);
-  std::uniform_real_distribution<> distr_theta(0, 2.0*M_PI);
-  std::uniform_real_distribution<> distr_x(left_x, right_x);
-
-
-  for(int i = 0; i < n; ++i)
-  {
-    x = distr_x(gen);
-    r = distr_r(gen);
-    theta = distr_theta(gen);
-    y = r * cos(theta);
-    z = r * sin(theta);
-    sum += sqrt(y*y + z*z);
-    std::cout<<x<<" "<<y<<" "<<z<<std::endl;
-  }
-  
-  sum = volume * sum/n;
-
-  std::cout<<"rank "<<rank<<": "<<sum<<std::endl;
-
-  return sum;
-}
-
+#define N 100
+#define TARGET 4.0*M_PI/3.0
 int main(int argc, char *argv[]){
-  int rank, size, n = 10;
+  int rank, size;
   MPI_Init(&argc, &argv);
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
+  double x, y, z, volume;
+  volume =  2.0*2.0*2.0/size;
+  //define random
+  std::random_device rand_dev;
+  std::mt19937 gen(rand_dev());
+  std::uniform_real_distribution<> dis_y(-1, 1);
+  std::uniform_real_distribution<> dis_z(-1, 1);
+  double tol = 1.0e-05, eps = 0.0, buf = 0.0, acc_volume, start_time, proc_sum = 0.0, proc_volume = 0.0;
+  int iter = 1, stop = 1;
 
-  /*..
-  double start_time = MPI_Wtime();
-  double end_time = MPI_Wtime();
-  ..*/
-
- 
-  double pie = 0.0, piece = integrate(rank, size, n);
-  
-
-  MPI_Reduce(&piece, &pie, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
-
-  if (rank == 0)
+  start_time = MPI_Wtime();
+  while(stop)
   {
-    cout<<"result: "<<pie<<endl;
+      for(int i = 0; i < N; ++i)
+      {
+          y = dis_y(gen);
+          z = dis_z(gen);
+          if (y*y + z*z <= 1)
+              proc_sum += sqrt(y*y + z*z);
+      }
+      proc_sum = volume * proc_sum/(iter*N);
+      MPI_Reduce(&proc_sum, &proc_volume, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+      if (rank == 0)
+      {
+          acc_volume = (iter-1)*acc_volume/iter + proc_volume;
+          eps = std::abs(TARGET - acc_volume);
+          if (eps < tol)
+              stop = 0;
+      }
+      ++iter;
+      MPI_Bcast(&stop, 1, MPI_INT, 0, MPI_COMM_WORLD);
   }
-
+  double end_time = MPI_Wtime();
+  double result_time, time = end_time - start_time;
+  MPI_Reduce(&time, &result_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+  if (rank == 0) {
+    std::cout<<"True: "<<TARGET<<std::endl;
+    std::cout<<"Integral: "<<acc_volume<<std::endl;
+    std::cout<<"Eps: "<<std::abs(TARGET - acc_volume)<<std::endl;
+    std::cout<<"N points: "<<size * N * iter<<std::endl;
+    std::cout<<"Time: "<<result_time<<std::endl;
+  }
   MPI_Barrier(MPI_COMM_WORLD);
   MPI_Finalize();
-    
   return 0;
 }

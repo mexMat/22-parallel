@@ -1,1 +1,1 @@
-mpirun -n 1 ./exec
+mpirun -n 4 ./exec
