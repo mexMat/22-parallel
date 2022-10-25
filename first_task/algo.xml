@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <algo>
     <params>
-        <param name="N" type="int" value="5"></param>
-        <param name="M" type="int" value="8"></param>
+        <param name="N" type="int" value="3"></param>
+        <param name="M" type="int" value="6"></param>
     </params>
 
     <block id="0" dims="1">

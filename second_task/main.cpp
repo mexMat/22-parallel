@@ -3,6 +3,7 @@
 #include <ctime>
 #include <cstdlib>
 #include <cmath>
+#include <ctime>
 #include "mpi.h"
 #define TARGET 4.0*M_PI/3.0
 int main(int argc, char *argv[]){
@@ -10,17 +11,19 @@ int main(int argc, char *argv[]){
   MPI_Init(&argc, &argv);
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
-  double y, z, volume = 8.0/size;
-  int N = 100;
-  //define random
+  double y, z, volume = 8.0;
+
   double tol = std::atof(argv[1]), eps = 0.0, acc_volume = 0.0, start_time, proc_sum = 0.0;
   int iter = 1, stop = 1;
-
+  
+  int pack_size = 1.0/tol/tol/size;
+  long N = 0, start_N = size * pack_size;
+  
   start_time = MPI_Wtime();
-  srand(rank+1);
+  srand(time(0)*(rank+1));
   while(stop)
   {
-    for(int i = 0; i < N; ++i)
+    for(int i = 0; i < pack_size; ++i)
     {
       y = -1 + 2.0*(double)rand()/(RAND_MAX+1.0);
       z = -1 + 2.0*(double)rand()/(RAND_MAX+1.0);
@@ -28,7 +31,12 @@ int main(int argc, char *argv[]){
         proc_sum += sqrt(y*y + z*z);
     }
     MPI_Allreduce(&proc_sum, &acc_volume, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    eps = std::abs(TARGET - volume*acc_volume/(iter*N));
+    eps = std::abs(TARGET - volume*acc_volume/(iter*N+start_N));
+    if (iter == 1)
+    {
+      pack_size = 1000/size;
+      N = pack_size * size;
+    }
     if (eps < tol)
     {
       stop = 0;
