@@ -16,9 +16,8 @@ int main(int argc, char *argv[]){
   double tol = std::atof(argv[1]), eps = 0.0, acc_volume = 0.0, start_time, proc_sum = 0.0;
   int iter = 1, stop = 1;
   
-  int pack_size = 1.0/tol/tol/size;
-  long N = 0, start_N = size * pack_size;
-  
+  int pack_size = 2000/size;
+  int N = pack_size*size; 
   start_time = MPI_Wtime();
   srand(time(0)*(rank+1));
   while(stop)
@@ -31,12 +30,7 @@ int main(int argc, char *argv[]){
         proc_sum += sqrt(y*y + z*z);
     }
     MPI_Allreduce(&proc_sum, &acc_volume, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    eps = std::abs(TARGET - volume*acc_volume/(iter*N+start_N));
-    if (iter == 1)
-    {
-      pack_size = 1000/size;
-      N = pack_size * size;
-    }
+    eps = std::abs(TARGET - volume*acc_volume/(iter*N));
     if (eps < tol)
     {
       stop = 0;

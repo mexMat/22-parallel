@@ -1,1 +1,1 @@
-mpirun -n 4 ./exec
+mpirun -n 1 ./exec 1e-04
