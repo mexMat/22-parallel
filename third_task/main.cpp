@@ -3,6 +3,21 @@
 #include <mpi.h>
 
 struct Config {
+
+    int coord_x, coord_y;
+
+    int size_comm_x, size_comm_y;
+
+    int block_size_y, block_size_x;
+
+    int init_point_x, init_point_y;
+
+    int end_point_x, end_point_y;
+
+
+
+    int rank;
+
     int size_x, size_y;
 
     double h_1, h_2;
@@ -29,7 +44,10 @@ struct Config {
 
     Config() = default;
 
-    Config(int size_x, int size_y,
+    Config(int coord_x, int coord_y,
+           int size_comm_x, int size_comm_y,
+           int rank,
+           int size_x, int size_y,
            double x_left, double x_right,
            double y_bot, double y_top,
            double alpha_L, double alpha_R,
@@ -42,8 +60,19 @@ struct Config {
            double (*edge_bot)(double, double),
            double (*edge_left)(double, double),
            double (*edge_right)(double, double)) {
+        this->coord_x = coord_x;
+        this->coord_y = coord_y;
+        this->size_comm_x = size_comm_x;
+        this->size_comm_y = size_comm_y;
+        this->rank = rank;
         this->size_x = size_x;
         this->size_y = size_y;
+        this->block_size_y = size_y/size_comm_y;
+        this->block_size_x = size_x/size_comm_x;
+        this->init_point_x = block_size_x * coord_x;
+        this->init_point_y = block_size_y * coord_y;
+        this->end_point_x = init_point_x + block_size_x;
+        this->end_point_y = init_point_y + block_size_y;
         this->h_1 = (double) (x_right - x_left) / (double) (size_x - 1);
         this->h_2 = (double) (y_top - y_bot) / (double) (size_y - 1);
         this->x_left = x_left;
@@ -209,10 +238,14 @@ public:
     }
 
     double getItem(int i, int j, int k) const {
+        i = i % y_size;
+        j = j % x_size;
         return matrix[i * x_size * k_size + j * k_size + k];
     }
 
     double &operator()(int i, int j, int k) {
+        i = i % y_size;
+        j = j % x_size;
         return matrix[i * x_size * k_size + j * k_size + k];
     }
 
@@ -224,9 +257,9 @@ public:
             std::cout << i << " ";
     };
 
-    void print() const {
-        for (int i = 0; i < getSizeX(); ++i)
-            for (int j = 0; j < getSizeY(); ++j) {
+    void print(Config *config) const {
+        for (int i = config->init_point_y; i < config->end_point_y; ++i)
+            for (int j = config->init_point_x; j < config->end_point_x; ++j) {
                 for (int k = 0; k < getSizeK(); ++k)
                     std::cout << getItem(i, j, k) << " ";
                 std::cout << "(" << i << ", " << j << ")\n";
@@ -285,8 +318,8 @@ class PuassonEquation {
         double x_left = config->x_left, x_right = config->x_right;
         double y_bot = config->y_bot, y_top = config->y_top;
         double xi, yj;
-        for (int i = 0; i < N; ++i)
-            for (int j = 0; j < M; ++j) {
+        for (int i = config->init_point_y; i < config->end_point_y; ++i)
+            for (int j = config->init_point_x; j < config->end_point_x; ++j) {
                 xi = x_left + j * h1;
                 yj = y_bot + i * h2;
                 // bottom points
@@ -483,16 +516,13 @@ class PuassonEquation {
     }
 
     static void set_true_solution(Matrix &a, Config *config) {
-        int N = config->size_y;
-        int M = config->size_x;
         double h1 = config->h_1;
         double h2 = config->h_2;
-        double h1_2 = h1 * h1, h2_2 = h2 * h2;
-        double x_left = config->x_left, x_right = config->x_right;
-        double y_bot = config->y_bot, y_top = config->y_top;
+        double x_left = config->x_left;
+        double y_bot = config->y_bot;
         double xi, yj;
-        for (int i = 0; i < N; ++i)
-            for (int j = 0; j < M; ++j) {
+        for (int i = config->init_point_y; i < config->end_point_y; ++i)
+            for (int j = config->init_point_x; j < config->end_point_x; ++j) {
                 xi = x_left + j * h1;
                 yj = y_bot + i * h2;
                 a(i, j, 0) = config->u_func(xi, yj);
@@ -501,27 +531,31 @@ class PuassonEquation {
 
 public:
     static Matrix solve(Config *config) {
-        Matrix matrix(config->size_x, config->size_y, 5);
-        Matrix f_vector(config->size_x, config->size_y, 1);
-        Matrix w_vector(config->size_x, config->size_y, 1);
-        Matrix r_vector(config->size_x, config->size_y, 1);
-        Matrix Ar_vector(config->size_x, config->size_y, 1);
-        Matrix true_solution(config->size_x, config->size_y, 1);
+        Matrix matrix(config->size_x/config->size_comm_x,
+                      config->size_y/config->size_comm_y, 5);
+        Matrix f_vector(config->size_x/config->size_comm_x,
+                        config->size_y/config->size_comm_y, 1);
+        Matrix w_vector(config->size_x/config->size_comm_x,
+                               config->size_y/config->size_comm_y, 1);
+        Matrix r_vector(config->size_x/config->size_comm_x,
+                        config->size_y/config->size_comm_y, 1);
+        Matrix Ar_vector(config->size_x/config->size_comm_x,
+                         config->size_y/config->size_comm_y, 1);
+        Matrix true_solution(config->size_x/config->size_comm_x,
+                             config->size_y/config->size_comm_y, 1);
         set_true_solution(true_solution, config);
         filling(matrix, f_vector, config);
-        optimize(matrix, f_vector, w_vector, r_vector, Ar_vector, true_solution, config);
-        Matrix::sub(true_solution, w_vector, r_vector);
-        std::cout << "norm abs: " << sqrt(norm(r_vector, config)) << std::endl;
-        std::cout << "max abs: " << norm_c(r_vector, config) << std::endl;
+
+//        optimize(matrix, f_vector, w_vector, r_vector, Ar_vector, true_solution, config);
+//        Matrix::sub(true_solution, w_vector, r_vector);
+//        std::cout << "norm abs: " << sqrt(norm(r_vector, config)) << std::endl;
+//        std::cout << "max abs: " << norm_c(r_vector, config) << std::endl;
         Matrix::mul(matrix, true_solution, Ar_vector);
         Matrix::sub(Ar_vector, f_vector, r_vector);
-        std::cout<<"!!!!!!!!!!!!!!!!!: "<<std::endl;
-        r_vector.print();
-        std::cout<<"?????????????????: "<<std::endl;
         std::cout << "true residual abs: " << sqrt(norm(r_vector, config)) << std::endl;
-        Matrix::mul(matrix, w_vector, Ar_vector);
-        Matrix::sub(Ar_vector, f_vector, r_vector);
-        std::cout << "residual abs: " << sqrt(norm(r_vector, config)) << std::endl;
+//        Matrix::mul(matrix, w_vector, Ar_vector);
+//        Matrix::sub(Ar_vector, f_vector, r_vector);
+//        std::cout << "residual abs: " << sqrt(norm(r_vector, config)) << std::endl;
     }
 };
 
@@ -529,25 +563,25 @@ public:
 int main(int argc, char *argv[]) {
 
     int rank, size = 9;
-//    MPI_Init(&argc, &argv);
-//    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-//    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Init(&argc, &argv);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    int dims[2];
-    [](int size, int *dims) {
-        int i;
-        for (i = 1; i < (size >> 1); ++i) {
-            if ((size / i <= i) and (size % i == 0)) {
-                break;
-            }
-        }
-        dims[0] = i;
-        dims[1] = size / i;
-    }(size, dims);
+    int dims_size[2] = {0, 0};
+    int periods[2] = {0, 0};
+    int coords[2] = {0, 0};
 
-    std::cout << dims[0] << " " << dims[1] << std::endl;
+    MPI_Comm comm;
+    MPI_Dims_create(size, 2, dims_size);
+    MPI_Cart_create(MPI_COMM_WORLD, 2, dims_size, periods,
+                    1, &comm);
+    MPI_Comm_rank(comm, &rank);
+    MPI_Cart_coords(comm, rank, 2, coords);
+
     //my config
     Config config(
+            coords[0], coords[1],
+            dims_size[0], dims_size[1],
+            rank,
             atoi(argv[1]), atoi(argv[2]),
             0., 4.,
             0., 3.,
@@ -578,74 +612,8 @@ int main(int argc, char *argv[]) {
                        + pow(4 + x * y, 0.5);
             }
     );
-
-    //config ramil
-
-        Config config_ramil(
-                atoi(argv[1]), atoi(argv[2]),
-                -2., 3.,
-                -1., 4.,
-                1., 1.,
-                1., 1.,
-                [](double x, double y) -> double { return 2. / (1. + x * x + y * y); },
-                [](double x, double y) -> double { return 4 + x; },
-                [](double x, double y) -> double { return 1; },
-                [](double x, double y) -> double {
-                    return (-4. * x - 32.) / pow((1. + x * x + y * y), 2) +
-                           16. * (x + 4) / pow((1 + x * x + y * y), 3) +
-                           2. / (1 + x * x + y * y);
-                },
-                [](double x, double y) -> double {
-                    return 2. * (-8 * y - 2. * x * y + x * x + y * y + 1) / pow((1 + x * x + y * y), 2.);
-                },
-                [](double x, double y) -> double {
-                    return 2. * (8 * y + 2. * x * y + x * x + y * y + 1) / pow((1 + x * x + y * y), 2.);
-                },
-                [](double x, double y) -> double {
-                    return 2. * (3. * x * x + y * y + 8. * x + 1) / pow((1 + x * x + y * y), 2.);
-                },
-                [](double x, double y) -> double {
-                    return 2. * (-x * x + y * y - 8. * x + 1) / pow((1 + x * x + y * y), 2.);
-                }
-        );
-
-    //config kirill
-    {
-        Config config_kirill(
-                atoi(argv[1]), atoi(argv[2]),
-                -2., 3.,
-                -1., 4.,
-                0., 0.,
-                0., 0.,
-                [](double x, double y) -> double { return 2.0 / (1.0 + x * x + y * y); },
-                [](double x, double y) -> double { return 1.0 + (x + y) * (x + y); },
-                [](double x, double y) -> double { return 1.0; },
-                [](double x, double y) -> double {
-                    return 2.0 / (1. + x * x + y * y) -
-                           ((4.0 * (x * x * x * x + 4.0 * x * x * x * y - 4.0 * x * (y * y * y + y) -
-                                    (y * y + 1.0) * (y * y + 1.0)) /
-                             ((1. + x * x + y * y) * (1. + x * x + y * y) * (1. + x * x + y * y))) -
-                            (4.0 * (x * x * x * x + 4.0 * x * x * x * y + 2.0 * x * x - 4.0 * x * y * (y * y - 1.0) -
-                                    y * y * y * y + 1.0) /
-                             ((1. + x * x + y * y) * (1. + x * x + y * y) * (1. + x * x + y * y))));
-                },
-                [](double x, double y) -> double {
-                    return -y * 4.0 * (1.0 + (x + y) * (x + y)) / ((1. + x * x + y * y) * (1. + x * x + y * y));
-                },
-                [](double x, double y) -> double {
-                    return y * 4.0 * (1.0 + (x + y) * (x + y)) / ((1. + x * x + y * y) * (1. + x * x + y * y));
-                },
-                [](double x, double y) -> double {
-                    return x * 4.0 * (1.0 + (x + y) * (x + y)) / ((1. + x * x + y * y) * (1. + x * x + y * y));
-                },
-                [](double x, double y) -> double {
-                    return -x * 4.0 * (1.0 + (x + y) * (x + y)) / ((1. + x * x + y * y) * (1. + x * x + y * y));
-                }
-        );
-    }
-
     PuassonEquation solver;
     solver.solve(&config);
-//    MPI_Finalize();
+    MPI_Finalize();
     return 0;
 }
