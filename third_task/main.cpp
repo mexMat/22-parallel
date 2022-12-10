@@ -1,8 +1,13 @@
 #include <iostream>
 #include <cmath>
 #include <mpi.h>
+#include <unistd.h>
 
 struct Config {
+
+    MPI_Comm comm;
+
+    MPI_Datatype row_type, column_type;
 
     int coord_x, coord_y;
 
@@ -13,8 +18,6 @@ struct Config {
     int init_point_x, init_point_y;
 
     int end_point_x, end_point_y;
-
-
 
     int rank;
 
@@ -44,7 +47,8 @@ struct Config {
 
     Config() = default;
 
-    Config(int coord_x, int coord_y,
+    Config(MPI_Comm &comm,
+           int coord_x, int coord_y,
            int size_comm_x, int size_comm_y,
            int rank,
            int size_x, int size_y,
@@ -60,6 +64,7 @@ struct Config {
            double (*edge_bot)(double, double),
            double (*edge_left)(double, double),
            double (*edge_right)(double, double)) {
+        this->comm = comm;
         this->coord_x = coord_x;
         this->coord_y = coord_y;
         this->size_comm_x = size_comm_x;
@@ -67,8 +72,15 @@ struct Config {
         this->rank = rank;
         this->size_x = size_x;
         this->size_y = size_y;
-        this->block_size_y = size_y/size_comm_y;
-        this->block_size_x = size_x/size_comm_x;
+        //set vector type
+        MPI_Type_vector(1, size_x / size_comm_x, 1,
+                        MPI_DOUBLE, &this->row_type);
+        MPI_Type_vector(size_y / size_comm_y, 1, size_x / size_comm_x,
+                        MPI_DOUBLE, &this->column_type);
+        MPI_Type_commit(&this->row_type);
+        MPI_Type_commit(&this->column_type);
+        this->block_size_y = size_y / size_comm_y;
+        this->block_size_x = size_x / size_comm_x;
         this->init_point_x = block_size_x * coord_x;
         this->init_point_y = block_size_y * coord_y;
         this->end_point_x = init_point_x + block_size_x;
@@ -141,14 +153,100 @@ public:
                 result(i, j, 0) = a(i, j, 0);
     }
 
-    static Matrix &mul(Matrix &A, Matrix &b, Matrix &result) {
-        int M = A.getSizeX();
-        int N = A.getSizeY();
-        for (int i = 0; i < N; ++i)
-            for (int j = 0; j < M; ++j) {
+    static Matrix &mul(Matrix &A, Matrix &b, Matrix &top_vector, Matrix &bot_vector,
+                       Matrix &left_vector, Matrix &right_vector, Matrix &result, Config *config) {
+        int N = config->size_y;
+        int M = config->size_x;
+        int dims[2] = {config->coord_x, config->coord_y};
+        int rank_left = 0, rank_right = 0, rank_top = 0, rank_bot = 0;
+        int x_left = 0, x_right = M / config->size_comm_x - 1;
+        int y_bot = N / config->size_comm_y - 1, y_top = 0;
+        MPI_Request request_right, request_left, request_bot, request_top;
+        MPI_Status status_right, status_left, status_bot, status_top;
+        if (config->coord_x != 0) {
+            dims[0] -= 1;
+            MPI_Cart_rank(config->comm, dims, &rank_left);
+            dims[0] += 1;
+        }
+        if (config->coord_x != config->size_comm_x - 1) {
+            dims[0] += 1;
+            MPI_Cart_rank(config->comm, dims, &rank_right);
+            dims[0] -= 1;
+        }
+        if (config->coord_y != 0) {
+            dims[1] -= 1;
+            MPI_Cart_rank(config->comm, dims, &rank_top);
+            dims[1] += 1;
+        }
+        if (config->coord_y != config->size_comm_y - 1) {
+            dims[1] += 1;
+            MPI_Cart_rank(config->comm, dims, &rank_bot);
+            dims[1] -= 1;
+        }
+        // sendrecv vec to/from right cross x dimension
+        if (config->coord_x == 0 or
+            config->coord_y == 0 or
+            config->coord_x == config->size_comm_x - 1 or
+            config->coord_y == config->size_comm_y - 1) {
+            // 0th row block
+            if (config->coord_y == 0) {
+                MPI_Isend(&b(y_bot, 0, 0), 1, config->row_type,
+                          rank_bot, config->rank, config->comm, &request_bot);
+                MPI_Recv(&bot_vector(0, 0, 0), config->size_x / config->size_comm_x, MPI_DOUBLE,
+                         rank_bot, rank_bot, config->comm, &status_bot);
+            }
+            // last row block
+            if (config->coord_y == config->size_comm_y - 1) {
+                MPI_Isend(&b(y_top, 0, 0), 1, config->row_type,
+                          rank_top, config->rank, config->comm, &request_top);
+                MPI_Recv(&top_vector(0, 0, 0), config->size_x / config->size_comm_x, MPI_DOUBLE,
+                         rank_top, rank_top, config->comm, &status_top);
+            }
+            // 0th column block
+            if (config->coord_x == 0) {
+                MPI_Isend(&b(0, x_right, 0), 1, config->column_type,
+                          rank_right, config->rank, config->comm, &request_right);
+                MPI_Recv(&right_vector(0, 0, 0), config->size_y / config->size_comm_y, MPI_DOUBLE,
+                         rank_right, rank_right, config->comm, &status_right);
+            }
+            // last column block
+            if (config->coord_x == config->size_comm_x - 1) {
+                MPI_Isend(&b(0, x_left, 0), 1, config->column_type,
+                          rank_left, config->rank, config->comm, &request_left);
+                MPI_Recv(&left_vector(0, 0, 0), config->size_y / config->size_comm_y, MPI_DOUBLE,
+                         rank_left, rank_left, config->comm, &status_left);
+            }
+        } else {
+            // send columns between first and last
+            MPI_Isend(&b(0, x_right, 0), 1, config->column_type,
+                      rank_right, config->rank, config->comm, &request_right);
+            MPI_Isend(&b(0, x_left, 0), 1, config->column_type,
+                      rank_left, config->rank, config->comm, &request_left);
+            // send row between first and last
+            MPI_Isend(&b(y_bot, 0, 0), 1, config->row_type,
+                      rank_bot, config->rank, config->comm, &request_bot);
+            MPI_Isend(&b(y_top, 0, 0), 1, config->row_type,
+                      rank_top, config->rank, config->comm, &request_top);
+            // recv columns between first and last
+            MPI_Recv(&left_vector(0, 0, 0), config->size_y / config->size_comm_y, MPI_DOUBLE,
+                     rank_left, rank_left, config->comm, &status_left);
+            MPI_Recv(&right_vector(0, 0, 0), config->size_y / config->size_comm_y, MPI_DOUBLE,
+                     rank_right, rank_right, config->comm, &status_right);
+            // recv rows between first and last
+            MPI_Recv(&top_vector(0, 0, 0), config->size_x / config->size_comm_x, MPI_DOUBLE,
+                     rank_top, rank_top, config->comm, &status_top);
+            MPI_Recv(&bot_vector(0, 0, 0), config->size_x / config->size_comm_x, MPI_DOUBLE,
+                     rank_bot, rank_bot, config->comm, &status_bot);
+        }
+
+        double right_point, left_point, bot_point, top_point;
+        const int start_y = config->init_point_y, end_y = config->end_point_y;
+        const int start_x = config->init_point_x, end_x = config->end_point_x;
+        for (int i = start_y; i < end_y; ++i)
+            for (int j = start_x; j < end_x; ++j) {
                 // bottom points
                 if (i == 0) {
-                    //left bottom
+                    //left bottom corner
                     if (j == 0) {
                         result(i, j, 0) =
                                 A(i, j, 0) * b(i, j + 1, 0) +
@@ -156,7 +254,7 @@ public:
                                 A(i, j, 2) * b(i, j, 0);
                         continue;
                     }
-                    //right bottom
+                    //right bottom corner
                     if (j == M - 1) {
                         result(i, j, 0) =
                                 A(i, j, 0) * b(i, j - 1, 0) +
@@ -164,11 +262,16 @@ public:
                                 A(i, j, 2) * b(i, j, 0);
                         continue;
                     }
-                    //edge
+                    left_point = b(i, j - 1, 0);
+                    right_point = b(i, j + 1, 0);
+                    if (j == start_x)
+                        left_point = left_vector(i, 0, 0);
+                    if (j == end_x)
+                        right_point = right_vector(i, 0, 0);
                     result(i, j, 0) =
                             A(i, j, 0) * b(i + 1, j, 0) +
-                            A(i, j, 1) * b(i, j - 1, 0) +
-                            A(i, j, 2) * b(i, j + 1, 0) +
+                            A(i, j, 1) * left_point +
+                            A(i, j, 2) * right_point +
                             A(i, j, 3) * b(i, j, 0);
                     continue;
                 }
@@ -190,40 +293,70 @@ public:
                                 A(i, j, 2) * b(i, j, 0);
                         continue;
                     }
-                    //edge
+                    //edge top
+                    left_point = b(i, j - 1, 0);
+                    right_point = b(i, j + 1, 0);
+                    if (j == start_x)
+                        left_point = left_vector(i, 0, 0);
+                    if (j == end_x)
+                        right_point = right_vector(i, 0, 0);
                     result(i, j, 0) =
                             A(i, j, 0) * b(i - 1, j, 0) +
-                            A(i, j, 1) * b(i, j - 1, 0) +
-                            A(i, j, 2) * b(i, j + 1, 0) +
+                            A(i, j, 1) * left_point +
+                            A(i, j, 2) * right_point +
                             A(i, j, 3) * b(i, j, 0);
                     continue;
                 }
                 //left points
                 if (j == 0) {
                     //edge
+                    bot_point = b(i - 1, j, 0);
+                    top_point = b(i + 1, j, 0);
+                    if (i == start_y)
+                        bot_point = top_vector(0, j, 0);
+                    if (i == end_y)
+                        top_point = bot_vector(0, j, 0);
                     result(i, j, 0) =
                             A(i, j, 0) * b(i, j + 1, 0) +
-                            A(i, j, 1) * b(i + 1, j, 0) +
-                            A(i, j, 2) * b(i - 1, j, 0) +
+                            A(i, j, 1) * top_point +
+                            A(i, j, 2) * bot_point +
                             A(i, j, 3) * b(i, j, 0);
                     continue;
                 }
                 //right points
                 if (j == M - 1) {
                     //edge
+                    bot_point = b(i - 1, j, 0);
+                    top_point = b(i + 1, j, 0);
+                    if (i == start_y)
+                        bot_point = top_vector(0, j, 0);
+                    if (i == end_y)
+                        top_point = bot_vector(0, j, 0);
                     result(i, j, 0) =
                             A(i, j, 0) * b(i, j - 1, 0) +
-                            A(i, j, 1) * b(i + 1, j, 0) +
-                            A(i, j, 2) * b(i - 1, j, 0) +
+                            A(i, j, 1) * top_point +
+                            A(i, j, 2) * bot_point +
                             A(i, j, 3) * b(i, j, 0);
                     continue;
                 }
+                bot_point = b(i - 1, j, 0);
+                top_point = b(i + 1, j, 0);
+                left_point = b(i, j - 1, 0);
+                right_point = b(i, j + 1, 0);
+                if (j == start_x)
+                    left_point = left_vector(i, 0, 0);
+                if (j == end_x)
+                    right_point = right_vector(i, 0, 0);
+                if (i == start_y)
+                    bot_point = top_vector(0, j, 0);
+                if (i == end_y)
+                    top_point = bot_vector(0, j, 0);
                 // inner points
                 result(i, j, 0) =
-                        A(i, j, 0) * b(i, j - 1, 0) +
-                        A(i, j, 1) * b(i, j + 1, 0) +
-                        A(i, j, 2) * b(i - 1, j, 0) +
-                        A(i, j, 3) * b(i + 1, j, 0) +
+                        A(i, j, 0) * left_point +
+                        A(i, j, 1) * right_point +
+                        A(i, j, 2) * bot_point +
+                        A(i, j, 3) * top_point +
                         A(i, j, 4) * b(i, j, 0);
             }
         return result;
@@ -249,14 +382,6 @@ public:
         return matrix[i * x_size * k_size + j * k_size + k];
     }
 
-    void print_plain() const {
-        for (int i = 0; i < size; ++i)
-            std::cout << this->matrix[i] << " ";
-        std::cout << std::endl;
-        for (int i = 0; i < size; ++i)
-            std::cout << i << " ";
-    };
-
     void print(Config *config) const {
         for (int i = config->init_point_y; i < config->end_point_y; ++i)
             for (int j = config->init_point_x; j < config->end_point_x; ++j) {
@@ -264,6 +389,12 @@ public:
                     std::cout << getItem(i, j, k) << " ";
                 std::cout << "(" << i << ", " << j << ")\n";
             }
+    }
+
+    void print_plain() const {
+        for (int i = 0; i < size; ++i)
+            std::cout << matrix[i] << " ";
+        std::cout << std::endl;
     }
 };
 
@@ -495,7 +626,7 @@ class PuassonEquation {
 
     static Matrix optimize(Matrix &matrix, Matrix &f_vector, Matrix &w_vector,
                            Matrix &r_vector, Matrix &Ar_vector, Matrix &true_solution, Config *config) {
-        double tau_k = 0.;
+/*        double tau_k = 0.;
         double eps = 10.;
         int iter = 0;
         while (eps > 1e-06) {
@@ -512,7 +643,7 @@ class PuassonEquation {
             std::cout << "iter: " << iter << "; eps: " << eps << std::endl;
             iter++;
             Matrix::copy(Ar_vector, w_vector);
-        }
+        }*/
     }
 
     static void set_true_solution(Matrix &a, Config *config) {
@@ -531,38 +662,53 @@ class PuassonEquation {
 
 public:
     static Matrix solve(Config *config) {
-        Matrix matrix(config->size_x/config->size_comm_x,
-                      config->size_y/config->size_comm_y, 5);
-        Matrix f_vector(config->size_x/config->size_comm_x,
-                        config->size_y/config->size_comm_y, 1);
-        Matrix w_vector(config->size_x/config->size_comm_x,
-                               config->size_y/config->size_comm_y, 1);
-        Matrix r_vector(config->size_x/config->size_comm_x,
-                        config->size_y/config->size_comm_y, 1);
-        Matrix Ar_vector(config->size_x/config->size_comm_x,
-                         config->size_y/config->size_comm_y, 1);
-        Matrix true_solution(config->size_x/config->size_comm_x,
-                             config->size_y/config->size_comm_y, 1);
+        Matrix matrix(config->size_x / config->size_comm_x,
+                      config->size_y / config->size_comm_y, 5);
+        Matrix f_vector(config->size_x / config->size_comm_x,
+                        config->size_y / config->size_comm_y, 1);
+        Matrix w_vector(config->size_x / config->size_comm_x,
+                        config->size_y / config->size_comm_y, 1);
+        Matrix r_vector(config->size_x / config->size_comm_x,
+                        config->size_y / config->size_comm_y, 1);
+        Matrix Ar_vector(config->size_x / config->size_comm_x,
+                         config->size_y / config->size_comm_y, 1);
+        Matrix bot_vector(config->size_x / config->size_comm_x, 1, 1);
+        Matrix top_vector(config->size_x / config->size_comm_x, 1, 1);
+        Matrix left_vector(1, config->size_y / config->size_comm_y, 1);
+        Matrix right_vector(1, config->size_y / config->size_comm_y, 1);
+        Matrix true_solution(config->size_x / config->size_comm_x,
+                             config->size_y / config->size_comm_y, 1);
         set_true_solution(true_solution, config);
         filling(matrix, f_vector, config);
+        Matrix::mul(matrix, true_solution, top_vector, bot_vector, left_vector, right_vector, Ar_vector, config);
+        if (config->rank == 0) {
+            std::cout << "f_vector: \n";
+            f_vector.print(config);
+            std::cout << "Aw: \n";
+            Ar_vector.print(config);
+        }
 
-//        optimize(matrix, f_vector, w_vector, r_vector, Ar_vector, true_solution, config);
-//        Matrix::sub(true_solution, w_vector, r_vector);
-//        std::cout << "norm abs: " << sqrt(norm(r_vector, config)) << std::endl;
-//        std::cout << "max abs: " << norm_c(r_vector, config) << std::endl;
+/*
+        optimize(matrix, f_vector, w_vector, r_vector, Ar_vector, true_solution, config);
+        Matrix::sub(true_solution, w_vector, r_vector);
+        std::cout << "norm abs: " << sqrt(norm(r_vector, config)) << std::endl;
+        std::cout << "max abs: " << norm_c(r_vector, config) << std::endl;
+
         Matrix::mul(matrix, true_solution, Ar_vector);
         Matrix::sub(Ar_vector, f_vector, r_vector);
         std::cout << "true residual abs: " << sqrt(norm(r_vector, config)) << std::endl;
-//        Matrix::mul(matrix, w_vector, Ar_vector);
-//        Matrix::sub(Ar_vector, f_vector, r_vector);
-//        std::cout << "residual abs: " << sqrt(norm(r_vector, config)) << std::endl;
+
+        Matrix::mul(matrix, w_vector, Ar_vector);
+        Matrix::sub(Ar_vector, f_vector, r_vector);
+        std::cout << "residual abs: " << sqrt(norm(r_vector, config)) << std::endl;
+*/
     }
 };
 
 
 int main(int argc, char *argv[]) {
 
-    int rank, size = 9;
+    int rank, size;
     MPI_Init(&argc, &argv);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
@@ -579,6 +725,7 @@ int main(int argc, char *argv[]) {
 
     //my config
     Config config(
+            comm,
             coords[0], coords[1],
             dims_size[0], dims_size[1],
             rank,
@@ -612,8 +759,7 @@ int main(int argc, char *argv[]) {
                        + pow(4 + x * y, 0.5);
             }
     );
-    PuassonEquation solver;
-    solver.solve(&config);
+    PuassonEquation::solve(&config);
     MPI_Finalize();
     return 0;
 }
