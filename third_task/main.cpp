@@ -97,12 +97,12 @@ struct Config {
         this->alpha_T = alpha_T;
         this->u_func = u_func;
         this->k_func = k_func;
-        this->q_func = q_func;
         this->f_func = f_func;
         this->edge_bot = edge_bot;
         this->edge_top = edge_top;
         this->edge_left = edge_left;
         this->edge_right = edge_right;
+        this->q_func = q_func;
     }
 };
 
@@ -122,6 +122,8 @@ public:
         this->k_size = k_size;
         this->size = x_size * y_size * k_size;
         this->matrix = new double[size];
+        for (int i = 0; i < size; ++i)
+            this->matrix[i] = 0.0;
     }
 
     int getSizeX() const {
@@ -136,24 +138,19 @@ public:
         return this->k_size;
     }
 
-    static Matrix &sub(Matrix &a, Matrix &b, Matrix &result) {
-        int M = a.getSizeX();
-        int N = a.getSizeY();
-        for (int i = 0; i < N; ++i)
-            for (int j = 0; j < M; ++j)
+    static void sub(Matrix &a, Matrix &b, Matrix &result, Config *config) {
+        for (int i = config->init_point_y; i < config->end_point_y; ++i)
+            for (int j = config->init_point_x; j < config->end_point_x; ++j)
                 result(i, j, 0) = a(i, j, 0) - b(i, j, 0);
-        return result;
     }
 
-    static Matrix &copy(Matrix &a, Matrix &result) {
-        int M = a.getSizeX();
-        int N = a.getSizeY();
-        for (int i = 0; i < N; ++i)
-            for (int j = 0; j < M; ++j)
+    static void copy(Matrix &a, Matrix &result, Config *config) {
+        for (int i = config->init_point_y; i < config->end_point_y; ++i)
+            for (int j = config->init_point_x; j < config->end_point_x; ++j)
                 result(i, j, 0) = a(i, j, 0);
     }
 
-    static Matrix &mul(Matrix &A, Matrix &b, Matrix &top_vector, Matrix &bot_vector,
+    static void mul(Matrix &A, Matrix &b, Matrix &top_vector, Matrix &bot_vector,
                        Matrix &left_vector, Matrix &right_vector, Matrix &result, Config *config) {
         int N = config->size_y;
         int M = config->size_x;
@@ -373,14 +370,12 @@ public:
                         A(i, j, 3) * bot_point +
                         A(i, j, 4) * b(i, j, 0);
             }
-        return result;
+//        return result;
     }
 
-    static Matrix &coef(Matrix &A, double alpha) {
-        int M = A.getSizeX();
-        int N = A.getSizeY();
-        for (int i = 0; i < N; ++i)
-            for (int j = 0; j < M; ++j)
+    static void coef(Matrix &A, double alpha, Config *config) {
+        for (int i = config->init_point_y; i < config->end_point_y; ++i)
+            for (int j = config->init_point_x; j < config->end_point_x; ++j)
                 A(i, j, 0) = alpha * A(i, j, 0);
     }
 
@@ -422,28 +417,28 @@ class PuassonEquation {
         double h2 = config->h_2;
         double p1, p2;
         double sum = 0.0;
-        for (int i = 0; i < N; ++i)
-            for (int j = 0; j < M; ++j) {
-                sum += h1 * h2 * a(i, j, 0) * b(i, j, 0);
-//                if ((i == 0) or (i == N - 1))
-//                    p2 = 0.5;
-//                else
-//                    p2 = 1.;
-//                if ((j == 0) or (j == N - 1))
-//                    p1 = 0.5;
-//                else
-//                    p1 = 1.;
-//                sum += h1 * h2 * p1 * p2 * a(i, j, 0) * b(i, j, 0);
+
+        for (int i = config->init_point_y; i < config->end_point_y; ++i)
+            for (int j = config->init_point_x; j < config->end_point_x; ++j) {
+//                sum += h1 * h2 * a(i, j, 0) * b(i, j, 0);
+                if ((i == 0) or (i == N - 1))
+                    p2 = 0.5;
+                else
+                    p2 = 1.;
+                if ((j == 0) or (j == N - 1))
+                    p1 = 0.5;
+                else
+                    p1 = 1.;
+                sum += h1 * h2 * p1 * p2 * a(i, j, 0) * b(i, j, 0);
             }
+
         return sum;
     }
 
     static double norm_c(Matrix &a, Config *config) {
-        int N = config->size_y;
-        int M = config->size_x;
         double max = a(0, 0, 0);
-        for (int i = 0; i < N; ++i)
-            for (int j = 0; j < M; ++j) {
+        for (int i = config->init_point_y; i < config->end_point_y; ++i)
+            for (int j = config->init_point_x; j < config->end_point_x; ++j) {
                 if (fabs(a(i, j, 0)) > max)
                     max = a(i, j, 0);
             }
@@ -454,7 +449,7 @@ class PuassonEquation {
         return dot(a, a, config);
     }
 
-    static Matrix filling(Matrix &matrix, Matrix &f_vector, Config *config) {
+    static void filling(Matrix &matrix, Matrix &f_vector, Config *config) {
         int N = config->size_y;
         int M = config->size_x;
         double h1 = config->h_1;
@@ -638,26 +633,40 @@ class PuassonEquation {
             }
     }
 
-    static Matrix optimize(Matrix &matrix, Matrix &f_vector, Matrix &w_vector,
-                           Matrix &r_vector, Matrix &Ar_vector, Matrix &true_solution, Config *config) {
-/*        double tau_k = 0.;
-        double eps = 10.;
+    static void optimize(Matrix &matrix, Matrix &f_vector, Matrix &w_vector,
+                           Matrix &r_vector, Matrix &Ar_vector, Matrix &true_solution,
+                           Matrix &top_vector, Matrix &bot_vector, Matrix &left_vector,
+                           Matrix &right_vector, Config *config) {
+        double tau_k = 0.;
+        double eps_proc, eps = 10.;
         int iter = 0;
         while (eps > 1e-06) {
-            Matrix::mul(matrix, w_vector, Ar_vector);
-            Matrix::sub(Ar_vector, f_vector, r_vector);
-            Matrix::mul(matrix, r_vector, Ar_vector);
+            Matrix::mul(matrix, w_vector, top_vector, bot_vector,
+                        left_vector, right_vector, Ar_vector, config);
+            Matrix::sub(Ar_vector, f_vector, r_vector, config);
+            Matrix::mul(matrix, r_vector, top_vector, bot_vector,
+                        left_vector, right_vector, Ar_vector, config);
             tau_k = dot(Ar_vector, r_vector, config);
             tau_k = tau_k / dot(Ar_vector, Ar_vector, config);
-            Matrix::coef(r_vector, tau_k);
-            Matrix::sub(w_vector, r_vector, Ar_vector);
-            Matrix::sub(Ar_vector, w_vector, r_vector);
-            eps = norm_c(r_vector, config);
-//            eps = sqrt(norm(r_vector, config));
-            std::cout << "iter: " << iter << "; eps: " << eps << std::endl;
-            iter++;
-            Matrix::copy(Ar_vector, w_vector);
-        }*/
+            Matrix::coef(r_vector, tau_k, config);
+            Matrix::sub(w_vector, r_vector, Ar_vector, config);
+            Matrix::sub(Ar_vector, w_vector, r_vector, config);
+            //e2 norm
+            eps_proc = norm(r_vector, config);
+            MPI_Allreduce(&eps_proc, &eps, 1, MPI_DOUBLE, MPI_SUM, config->comm);
+            eps = sqrt(eps);
+            //max norm
+//            eps_proc = norm_c(r_vector, config);
+//            MPI_Allreduce(&eps_proc, &eps, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+//            if (config->rank == 0) {
+//                std::cout<<iter<<std::endl;
+//                std::cout << "    eps: " << eps << std::endl;
+//            }
+            ++iter;
+            Matrix::copy(Ar_vector, w_vector, config);
+        }
+        if (config->rank == 0)
+            std::cout<<"iter: "<<iter<<std::endl;
     }
 
     static void set_true_solution(Matrix &a, Config *config) {
@@ -672,12 +681,13 @@ class PuassonEquation {
                 yj = y_bot + i * h2;
 //                if (i == j)
 //                    a(i, j, 0) = 1;
+
                 a(i, j, 0) = config->u_func(xi, yj);
             }
     }
 
 public:
-    static Matrix solve(Config *config) {
+    static void solve(Config *config) {
         Matrix matrix(config->size_x / config->size_comm_x,
                       config->size_y / config->size_comm_y, 5);
         Matrix f_vector(config->size_x / config->size_comm_x,
@@ -696,30 +706,44 @@ public:
                              config->size_y / config->size_comm_y, 1);
         set_true_solution(true_solution, config);
         filling(matrix, f_vector, config);
-        Matrix::mul(matrix, true_solution, top_vector, bot_vector, left_vector, right_vector, Ar_vector, config);
 
-        /*
+//        if (config->rank == 6) {
+//            std::cout << "f_vector: \n";
+//            f_vector.print(config);
+//            std::cout << "Aw: \n";
+//            Ar_vector.print(config);
+//            std::cout << "Aw - f_vector: \n";
+//            Matrix::sub(Ar_vector, f_vector, Ar_vector, config);
+//            Ar_vector.print(config);
+//            std::cout << "max norm:\n";
+//            std::cout<<PuassonEquation::norm_c(Ar_vector, config)<<std::endl;
+//            std::cout << "e2 norm:\n";
+//            std::cout<<PuassonEquation::norm(Ar_vector, config)<<std::endl;
+//            std::cout << "dot:\n";
+//            std::cout<<PuassonEquation::dot(true_solution, true_solution, config)<<std::endl;
+//            std::cout << "copy:\n";
+//            Matrix::copy(f_vector, w_vector, config);
+//            w_vector.print(config);
+//            std::cout << "coef:\n";
+//            Matrix::coef(w_vector, -10.0, config);
+//            w_vector.print(config);
+//        }
+        double start_time = MPI_Wtime();
+        optimize(matrix, f_vector, w_vector, r_vector, Ar_vector, true_solution,
+                 top_vector, bot_vector, left_vector, right_vector, config);
+        double end_time = MPI_Wtime();
+        double result_time, time = end_time - start_time;
+        MPI_Reduce(&time, &result_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+        Matrix::sub(true_solution, w_vector, r_vector, config);
+        double error_e2_proc = norm(r_vector, config), error_e2;
+        double error_max_proc = norm(r_vector, config), error_max;
+        MPI_Reduce(&error_e2_proc, &error_e2, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&error_max_proc, &error_max, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
         if (config->rank == 0) {
-            std::cout << "f_vector: \n";
-            f_vector.print(config);
-            std::cout << "Aw: \n";
-            Ar_vector.print(config);
-        }*/
-
-/*
-        optimize(matrix, f_vector, w_vector, r_vector, Ar_vector, true_solution, config);
-        Matrix::sub(true_solution, w_vector, r_vector);
-        std::cout << "norm abs: " << sqrt(norm(r_vector, config)) << std::endl;
-        std::cout << "max abs: " << norm_c(r_vector, config) << std::endl;
-
-        Matrix::mul(matrix, true_solution, Ar_vector);
-        Matrix::sub(Ar_vector, f_vector, r_vector);
-        std::cout << "true residual abs: " << sqrt(norm(r_vector, config)) << std::endl;
-
-        Matrix::mul(matrix, w_vector, Ar_vector);
-        Matrix::sub(Ar_vector, f_vector, r_vector);
-        std::cout << "residual abs: " << sqrt(norm(r_vector, config)) << std::endl;
-*/
+            std::cout<<"result time: "<<result_time<<std::endl;
+            std::cout<<"abs norm e2: "<<sqrt(error_e2)<<std::endl;
+            std::cout<<"abs norm max: "<<error_max<<std::endl;
+        }
     }
 };
 
