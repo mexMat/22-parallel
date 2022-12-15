@@ -1,8 +1,7 @@
 #include <iostream>
 #include <cmath>
 #include <mpi.h>
-#include <omp.h>
-
+#include <unistd.h>
 
 struct Config {
 
@@ -19,8 +18,6 @@ struct Config {
     int init_point_x, init_point_y;
 
     int end_point_x, end_point_y;
-
-    int rank_left, rank_right, rank_top, rank_bot;
 
     int rank;
 
@@ -82,31 +79,6 @@ struct Config {
                         MPI_DOUBLE, &this->column_type);
         MPI_Type_commit(&this->row_type);
         MPI_Type_commit(&this->column_type);
-        rank_left = 0;
-        rank_right = 0;
-        rank_top = 0;
-        rank_bot = 0;
-        int dims[2] = {coord_x, coord_y};
-        if (coord_x != 0) {
-            dims[0] -= 1;
-            MPI_Cart_rank(comm, dims, &rank_left);
-            dims[0] += 1;
-        }
-        if (coord_x != size_comm_x - 1) {
-            dims[0] += 1;
-            MPI_Cart_rank(comm, dims, &rank_right);
-            dims[0] -= 1;
-        }
-        if (coord_y != 0) {
-            dims[1] -= 1;
-            MPI_Cart_rank(comm, dims, &rank_top);
-            dims[1] += 1;
-        }
-        if (coord_y != size_comm_y - 1) {
-            dims[1] += 1;
-            MPI_Cart_rank(comm, dims, &rank_bot);
-            dims[1] -= 1;
-        }
         this->block_size_y = size_y / size_comm_y;
         this->block_size_x = size_x / size_comm_x;
         this->init_point_x = block_size_x * coord_x;
@@ -167,25 +139,12 @@ public:
     }
 
     static void sub(Matrix &a, Matrix &b, Matrix &result, Config *config) {
-        #pragma omp parallel for collapse(2)
-        for (int i = config->init_point_y; i < config->end_point_y; ++i) {
-            for (int j = config->init_point_x; j < config->end_point_x; ++j) {
+        for (int i = config->init_point_y; i < config->end_point_y; ++i)
+            for (int j = config->init_point_x; j < config->end_point_x; ++j)
                 result(i, j, 0) = a(i, j, 0) - b(i, j, 0);
-            }
-        }
-    }
-
-    static void add(Matrix &a, Matrix &b, double alpha, double beta, Matrix &result, Config *config) {
-        #pragma omp parallel for collapse(2)
-        for (int i = config->init_point_y; i < config->end_point_y; ++i) {
-            for (int j = config->init_point_x; j < config->end_point_x; ++j) {
-                result(i, j, 0) = alpha * a(i, j, 0) + beta * b(i, j, 0);
-            }
-        }
     }
 
     static void copy(Matrix &a, Matrix &result, Config *config) {
-        #pragma omp parallel for collapse(2)
         for (int i = config->init_point_y; i < config->end_point_y; ++i)
             for (int j = config->init_point_x; j < config->end_point_x; ++j)
                 result(i, j, 0) = a(i, j, 0);
@@ -199,10 +158,101 @@ public:
         int rank_left = 0, rank_right = 0, rank_top = 0, rank_bot = 0;
         int x_left = 0, x_right = M / config->size_comm_x - 1;
         int y_bot = N / config->size_comm_y - 1, y_top = 0;
+        MPI_Request request_right, request_left, request_bot, request_top;
+        MPI_Status status_right, status_left, status_bot, status_top;
+        if (config->coord_x != 0) {
+            dims[0] -= 1;
+            MPI_Cart_rank(config->comm, dims, &rank_left);
+            dims[0] += 1;
+        }
+        if (config->coord_x != config->size_comm_x - 1) {
+            dims[0] += 1;
+            MPI_Cart_rank(config->comm, dims, &rank_right);
+            dims[0] -= 1;
+        }
+        if (config->coord_y != 0) {
+            dims[1] -= 1;
+            MPI_Cart_rank(config->comm, dims, &rank_top);
+            dims[1] += 1;
+        }
+        if (config->coord_y != config->size_comm_y - 1) {
+            dims[1] += 1;
+            MPI_Cart_rank(config->comm, dims, &rank_bot);
+            dims[1] -= 1;
+        }
+        if (config->coord_y == 0 or
+            config->coord_y == config->size_comm_y - 1) {
+            if (config->coord_y == 0) {
+                // 0th row block
+                MPI_Isend(&b(y_bot, 0, 0), 1, config->row_type,
+                          rank_bot, config->rank, config->comm, &request_bot);
+                MPI_Recv(&bot_vector(0, 0, 0), config->size_x / config->size_comm_x, MPI_DOUBLE,
+                         rank_bot, rank_bot, config->comm, &status_bot);
+            }
+            // last row block
+            if (config->coord_y == config->size_comm_y - 1) {
+                MPI_Isend(&b(y_top, 0, 0), 1, config->row_type,
+                          rank_top, config->rank, config->comm, &request_top);
+                MPI_Recv(&top_vector(0, 0, 0), config->size_x / config->size_comm_x, MPI_DOUBLE,
+                         rank_top, rank_top, config->comm, &status_top);
+            }
+        } else {
+            // send row between first and last
+            MPI_Isend(&b(y_bot, 0, 0), 1, config->row_type,
+                      rank_bot, config->rank, config->comm, &request_bot);
+            MPI_Isend(&b(y_top, 0, 0), 1, config->row_type,
+                      rank_top, config->rank, config->comm, &request_top);
+            // recv rows between first and last
+            MPI_Recv(&top_vector(0, 0, 0), config->size_x / config->size_comm_x, MPI_DOUBLE,
+                     rank_top, rank_top, config->comm, &status_top);
+            MPI_Recv(&bot_vector(0, 0, 0), config->size_x / config->size_comm_x, MPI_DOUBLE,
+                     rank_bot, rank_bot, config->comm, &status_bot);
+        }
+
+        // sendrecv vec to/from right cross x dimension
+        if (config->coord_x == 0 or
+            config->coord_x == config->size_comm_x - 1) {
+
+            // 0th column block
+            if (config->coord_x == 0) {
+                MPI_Isend(&b(0, x_right, 0), 1, config->column_type,
+                          rank_right, config->rank, config->comm, &request_right);
+                MPI_Recv(&right_vector(0, 0, 0), config->size_y / config->size_comm_y, MPI_DOUBLE,
+                         rank_right, rank_right, config->comm, &status_right);
+            }
+            // last column block
+            if (config->coord_x == config->size_comm_x - 1) {
+                MPI_Isend(&b(0, x_left, 0), 1, config->column_type,
+                          rank_left, config->rank, config->comm, &request_left);
+                MPI_Recv(&left_vector(0, 0, 0), config->size_y / config->size_comm_y, MPI_DOUBLE,
+                         rank_left, rank_left, config->comm, &status_left);
+            }
+        } else {
+            // send columns between first and last
+            MPI_Isend(&b(0, x_right, 0), 1, config->column_type,
+                      rank_right, config->rank, config->comm, &request_right);
+            MPI_Isend(&b(0, x_left, 0), 1, config->column_type,
+                      rank_left, config->rank, config->comm, &request_left);
+            // recv columns between first and last
+            MPI_Recv(&left_vector(0, 0, 0), config->size_y / config->size_comm_y, MPI_DOUBLE,
+                     rank_left, rank_left, config->comm, &status_left);
+            MPI_Recv(&right_vector(0, 0, 0), config->size_y / config->size_comm_y, MPI_DOUBLE,
+                     rank_right, rank_right, config->comm, &status_right);
+        }
+
+/*        if (config->rank == 0) {
+            std::cout << "top:\n";
+            top_vector.print_plain();
+            std::cout << "bot:\n";
+            bot_vector.print_plain();
+            std::cout << "left:\n";
+            left_vector.print_plain();
+            std::cout << "right:\n";
+            right_vector.print_plain();
+        }*/
         double right_point, left_point, bot_point, top_point;
         const int start_y = config->init_point_y, end_y = config->end_point_y;
         const int start_x = config->init_point_x, end_x = config->end_point_x;
-        #pragma omp parallel for collapse(2) private(right_point, left_point, bot_point, top_point)
         for (int i = start_y; i < end_y; ++i)
             for (int j = start_x; j < end_x; ++j) {
                 // top points
@@ -320,10 +370,10 @@ public:
                         A(i, j, 3) * bot_point +
                         A(i, j, 4) * b(i, j, 0);
             }
+//        return result;
     }
 
     static void coef(Matrix &A, double alpha, Config *config) {
-        #pragma omp parallel for collapse(2)
         for (int i = config->init_point_y; i < config->end_point_y; ++i)
             for (int j = config->init_point_x; j < config->end_point_x; ++j)
                 A(i, j, 0) = alpha * A(i, j, 0);
@@ -360,115 +410,38 @@ public:
 // N - number of rows
 // M - number of columns
 class PuassonEquation {
-
-    static void sendrecv(Matrix &b, Matrix &top_vector, Matrix &bot_vector, Matrix &left_vector, Matrix &right_vector,
-                         Config *config) {
-        int N = config->size_y;
-        int M = config->size_x;
-        int dims[2] = {config->coord_x, config->coord_y};
-        int rank_left = 0, rank_right = 0, rank_top = 0, rank_bot = 0;
-        int x_left = 0, x_right = M / config->size_comm_x - 1;
-        int y_bot = N / config->size_comm_y - 1, y_top = 0;
-        MPI_Request request_right, request_left, request_bot, request_top;
-        MPI_Status status_right, status_left, status_bot, status_top;
-        rank_left = config->rank_left;
-        rank_right = config->rank_right;
-        rank_top = config->rank_top;
-        rank_bot = config->rank_bot;
-        if (config->coord_y == 0 or
-            config->coord_y == config->size_comm_y - 1) {
-            if (config->coord_y == 0) {
-                // 0th row block
-                MPI_Isend(&b(y_bot, 0, 0), 1, config->row_type,
-                          rank_bot, config->rank, config->comm, &request_bot);
-                MPI_Recv(&bot_vector(0, 0, 0), config->size_x / config->size_comm_x, MPI_DOUBLE,
-                         rank_bot, rank_bot, config->comm, &status_bot);
-            }
-            // last row block
-            if (config->coord_y == config->size_comm_y - 1) {
-                MPI_Isend(&b(y_top, 0, 0), 1, config->row_type,
-                          rank_top, config->rank, config->comm, &request_top);
-                MPI_Recv(&top_vector(0, 0, 0), config->size_x / config->size_comm_x, MPI_DOUBLE,
-                         rank_top, rank_top, config->comm, &status_top);
-            }
-        } else {
-            // send row between first and last
-            MPI_Isend(&b(y_bot, 0, 0), 1, config->row_type,
-                      rank_bot, config->rank, config->comm, &request_bot);
-            MPI_Isend(&b(y_top, 0, 0), 1, config->row_type,
-                      rank_top, config->rank, config->comm, &request_top);
-            // recv rows between first and last
-            MPI_Recv(&top_vector(0, 0, 0), config->size_x / config->size_comm_x, MPI_DOUBLE,
-                     rank_top, rank_top, config->comm, &status_top);
-            MPI_Recv(&bot_vector(0, 0, 0), config->size_x / config->size_comm_x, MPI_DOUBLE,
-                     rank_bot, rank_bot, config->comm, &status_bot);
-        }
-
-        // sendrecv vec to/from right cross x dimension
-        if (config->coord_x == 0 or
-            config->coord_x == config->size_comm_x - 1) {
-
-            // 0th column block
-            if (config->coord_x == 0) {
-                MPI_Isend(&b(0, x_right, 0), 1, config->column_type,
-                          rank_right, config->rank, config->comm, &request_right);
-                MPI_Recv(&right_vector(0, 0, 0), config->size_y / config->size_comm_y, MPI_DOUBLE,
-                         rank_right, rank_right, config->comm, &status_right);
-            }
-            // last column block
-            if (config->coord_x == config->size_comm_x - 1) {
-                MPI_Isend(&b(0, x_left, 0), 1, config->column_type,
-                          rank_left, config->rank, config->comm, &request_left);
-                MPI_Recv(&left_vector(0, 0, 0), config->size_y / config->size_comm_y, MPI_DOUBLE,
-                         rank_left, rank_left, config->comm, &status_left);
-            }
-        } else {
-            // send columns between first and last
-            MPI_Isend(&b(0, x_right, 0), 1, config->column_type,
-                      rank_right, config->rank, config->comm, &request_right);
-            MPI_Isend(&b(0, x_left, 0), 1, config->column_type,
-                      rank_left, config->rank, config->comm, &request_left);
-            // recv columns between first and last
-            MPI_Recv(&left_vector(0, 0, 0), config->size_y / config->size_comm_y, MPI_DOUBLE,
-                     rank_left, rank_left, config->comm, &status_left);
-            MPI_Recv(&right_vector(0, 0, 0), config->size_y / config->size_comm_y, MPI_DOUBLE,
-                     rank_right, rank_right, config->comm, &status_right);
-        }
-    }
-
     static double dot(Matrix &a, Matrix &b, Config *config) {
         int N = config->size_y;
         int M = config->size_x;
         double h1 = config->h_1;
         double h2 = config->h_2;
         double p1, p2;
-        double sum_e2 = 0.0;
-        #pragma omp parallel for collapse(2) reduction(+:sum_e2)
+        double sum = 0.0;
+
         for (int i = config->init_point_y; i < config->end_point_y; ++i)
             for (int j = config->init_point_x; j < config->end_point_x; ++j) {
-                sum_e2 += a(i, j, 0) * b(i, j, 0);
                 if ((i == 0) or (i == N - 1))
                     p2 = 0.5;
                 else
                     p2 = 1.;
-                if ((j == 0) or (j == M - 1))
+                if ((j == 0) or (j == N - 1))
                     p1 = 0.5;
                 else
                     p1 = 1.;
-                sum_e2 += h1 * h2 * p1 * p2 * a(i, j, 0) * b(i, j, 0);
+                sum += h1 * h2 * p1 * p2 * a(i, j, 0) * b(i, j, 0);
             }
-        return sum_e2;
+
+        return sum;
     }
 
     static double norm_c(Matrix &a, Config *config) {
-        double max_val = a(0, 0, 0);
-        #pragma omp parallel for collapse(2) reduction(max:max_val)
+        double max = a(0, 0, 0);
         for (int i = config->init_point_y; i < config->end_point_y; ++i)
             for (int j = config->init_point_x; j < config->end_point_x; ++j) {
-                if (fabs(a(i, j, 0)) > max_val)
-                    max_val = fabs(a(i, j, 0));
+                if (fabs(a(i, j, 0)) > max)
+                    max = a(i, j, 0);
             }
-        return max_val;
+        return fabs(max);
     }
 
     static double norm(Matrix &a, Config *config) {
@@ -663,35 +636,37 @@ class PuassonEquation {
                          Matrix &r_vector, Matrix &Ar_vector, Matrix &true_solution,
                          Matrix &top_vector, Matrix &bot_vector, Matrix &left_vector,
                          Matrix &right_vector, Config *config) {
-
-        double tau_ar_proc[2] = {0., 0.}, tau_ar[2] = {0., 0.}, tau_k;
-        double eps_proc = 0., eps = 10.;
+        double tau_k = 0.;
+        double eps_proc, eps = 10.;
         int iter = 0;
         while (eps > 1e-06) {
-            PuassonEquation::sendrecv(w_vector, top_vector, bot_vector, left_vector, right_vector, config);
             Matrix::mul(matrix, w_vector, top_vector, bot_vector,
                         left_vector, right_vector, Ar_vector, config);
             Matrix::sub(Ar_vector, f_vector, r_vector, config);
-            PuassonEquation::sendrecv(r_vector, top_vector, bot_vector, left_vector, right_vector, config);
             Matrix::mul(matrix, r_vector, top_vector, bot_vector,
                         left_vector, right_vector, Ar_vector, config);
-            tau_ar_proc[0] = dot(Ar_vector, r_vector,  config);
-            tau_ar_proc[1] = dot(Ar_vector, Ar_vector,  config);
-            MPI_Allreduce(&tau_ar_proc, &tau_ar, 2, MPI_DOUBLE, MPI_SUM, config->comm);
-            tau_k = tau_ar[0]/tau_ar[1];
-            Matrix::add(w_vector, r_vector, 1.0, -tau_k, w_vector, config);
+            tau_k = dot(Ar_vector, r_vector, config);
+            tau_k = tau_k / dot(Ar_vector, Ar_vector, config);
+            Matrix::coef(r_vector, tau_k, config);
+            Matrix::sub(w_vector, r_vector, Ar_vector, config);
+            Matrix::sub(Ar_vector, w_vector, r_vector, config);
             //e2 norm
-            eps_proc = norm(r_vector,  config);
+            eps_proc = norm(r_vector, config);
             MPI_Allreduce(&eps_proc, &eps, 1, MPI_DOUBLE, MPI_SUM, config->comm);
             eps = sqrt(eps);
+            //max norm
+//            eps_proc = norm_c(r_vector, config);
+//            MPI_Allreduce(&eps_proc, &eps, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+//            if (config->rank == 0) {
+//                std::cout<<iter<<std::endl;
+//                std::cout << "    eps: " << eps << std::endl;
+//            }
             ++iter;
+            Matrix::copy(Ar_vector, w_vector, config);
         }
-        if (config->rank == 0) {
+        if (config->rank == 0)
             std::cout<<"iter: "<<iter<<std::endl;
-//            w_vector.print(config);
-        }
     }
-
 
     static void set_true_solution(Matrix &a, Config *config) {
         double h1 = config->h_1;
@@ -703,12 +678,14 @@ class PuassonEquation {
             for (int j = config->init_point_x; j < config->end_point_x; ++j) {
                 xi = x_left + j * h1;
                 yj = y_bot + i * h2;
+//                if (i == j)
+//                    a(i, j, 0) = 1;
+
                 a(i, j, 0) = config->u_func(xi, yj);
             }
     }
 
 public:
-
     static void solve(Config *config) {
         Matrix matrix(config->size_x / config->size_comm_x,
                       config->size_y / config->size_comm_y, 5);
@@ -727,31 +704,51 @@ public:
         Matrix true_solution(config->size_x / config->size_comm_x,
                              config->size_y / config->size_comm_y, 1);
         set_true_solution(true_solution, config);
-        double start_time = MPI_Wtime();
         filling(matrix, f_vector, config);
+
+//        if (config->rank == 6) {
+//            std::cout << "f_vector: \n";
+//            f_vector.print(config);
+//            std::cout << "Aw: \n";
+//            Ar_vector.print(config);
+//            std::cout << "Aw - f_vector: \n";
+//            Matrix::sub(Ar_vector, f_vector, Ar_vector, config);
+//            Ar_vector.print(config);
+//            std::cout << "max norm:\n";
+//            std::cout<<PuassonEquation::norm_c(Ar_vector, config)<<std::endl;
+//            std::cout << "e2 norm:\n";
+//            std::cout<<PuassonEquation::norm(Ar_vector, config)<<std::endl;
+//            std::cout << "dot:\n";
+//            std::cout<<PuassonEquation::dot(true_solution, true_solution, config)<<std::endl;
+//            std::cout << "copy:\n";
+//            Matrix::copy(f_vector, w_vector, config);
+//            w_vector.print(config);
+//            std::cout << "coef:\n";
+//            Matrix::coef(w_vector, -10.0, config);
+//            w_vector.print(config);
+//        }
+        double start_time = MPI_Wtime();
         optimize(matrix, f_vector, w_vector, r_vector, Ar_vector, true_solution,
                  top_vector, bot_vector, left_vector, right_vector, config);
         double end_time = MPI_Wtime();
         double result_time, time = end_time - start_time;
         MPI_Reduce(&time, &result_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
         Matrix::sub(true_solution, w_vector, r_vector, config);
-        double error_e2_proc = 0., error_e2 = 0.;
-        error_e2_proc = norm(r_vector,  config);
-        double error_max_proc, error_max;
-        error_max_proc = norm(r_vector,  config);
+        double error_e2_proc = norm(r_vector, config), error_e2;
+        double error_max_proc = norm(r_vector, config), error_max;
         MPI_Reduce(&error_e2_proc, &error_e2, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
         MPI_Reduce(&error_max_proc, &error_max, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
         if (config->rank == 0) {
-            std::cout << "result time: " << result_time << std::endl;
-            std::cout << "abs norm e2: " << sqrt(error_e2) << std::endl;
-            std::cout << "abs norm max: " << error_max << std::endl;
+            std::cout<<"result time: "<<result_time<<std::endl;
+            std::cout<<"abs norm e2: "<<sqrt(error_e2)<<std::endl;
+            std::cout<<"abs norm max: "<<error_max<<std::endl;
         }
     }
-
 };
 
 
 int main(int argc, char *argv[]) {
+
     int rank, size;
     MPI_Init(&argc, &argv);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
